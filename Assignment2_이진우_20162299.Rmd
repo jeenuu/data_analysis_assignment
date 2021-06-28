@@ -1,0 +1,243 @@
+---
+title: "Assignment 2  이진우  20162299"
+subtitle: "Data Analysis with Applications"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document: 
+    highlight: pygments
+  pdf_document: default
+---
+
+<br/>
+
+### CommonBank Dataset
+
+<br/>
+
+### 1번
+먼저 ID와 ZIP.code는 feature에서 제외한다. 그리고 z-score normalization을 활용하여 모든 feature들의 scale을 일치시킨다.  
+첫 4,000명의 데이터를 training set으로, 나머지 1,000명의 데이터를 test set으로 사용하고,  
+training set과 test set에서의 target variable의 분포를 비교해 보자.
+
+```{r message=FALSE}
+# 사용할 패키지 추가
+library(ggplot2)
+library(caret)
+library(class)
+library(dplyr)
+```
+
+```{r 1번}
+# 데이터파일 읽기
+cmbnk <- read.csv("CommonBank.csv")
+
+# ID와 ZIP.CODE 제외
+cmbnk <- cmbnk[c(-1,-5)]
+
+# PersonalLoan 열을 첫번째열로 변경
+cmbnk <- select(cmbnk,PersonalLoan,everything())
+
+# target feature를 factor로 변경, Accept를 먼저 적어줌
+cmbnk$PersonalLoan <- factor(cmbnk$PersonalLoan, levels = c(1,0), labels = c("Accept", "Reject"))
+str(cmbnk)
+
+# z-score normalization
+normalize <- function(x) {
+  return ( (x-mean(x)) / (sd(x)))
+}
+cmbnk_n <- as.data.frame(lapply(cmbnk[2:12],normalize))
+str(cmbnk_n)
+
+# train set과 test set 생성
+cmbnk_train <- cmbnk_n[1:4000, ]
+cmbnk_test <- cmbnk_n[4001:5000, ]
+cmbnk_train_labels <- cmbnk[1:4000, 1]
+cmbnk_test_labels <- cmbnk[4001:5000, 1]
+
+# target variable 분포 비교
+# 분포 비교를 위해 필요한 데이터프레임을 생성
+train_target <- data.frame(PersonalLoan = cmbnk_train_labels, set = "train")
+test_target <- data.frame(PersonalLoan = cmbnk_test_labels, set = "test")
+train_test <- rbind(train_target, test_target)
+
+# 백분율로 분포를 비교해보기 위해 위에서 만든 데이터프레임을 요약정리
+plotdata <- train_test %>%
+  group_by(set, PersonalLoan) %>%
+  summarize(n = n()) %>% 
+  mutate(pct = n/sum(n),
+         lbl = scales::percent(pct))
+head(plotdata)
+
+# Segmented Bar Chart로 분포 비교 그래프 작성
+ggplot(plotdata, aes(x=factor(set), y=pct, fill=factor(PersonalLoan))) +
+  geom_bar(stat = "identity", position = "fill") +
+  geom_text(aes(label = lbl), size = 3, position = position_stack(vjust = 0.5)) +
+  scale_x_discrete(limits=c("train","test")) +
+  scale_y_continuous(breaks = seq(0, 1, .1),label = scales::percent) +
+  coord_fixed(ratio = 3) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "training set과 test set에서의 target variable의 분포 비교", x = "Set", y = "Percent", fill = "PersonalLoan")
+```
+  
+test set의 Accept가 train set의 Accept보다 2%p 높습니다.  
+이 2%p가 test set으로 혹시 너무 편향되게 나눠진 것인지 확인해보고 싶어서  
+train set과 test set에서 각각 유의수준 5%에서 모비율의 검정을 해봤습니다.  
+  
+p0 = (397+83)/(4000+1000) = 0.096, p^a = 0.1(train set), p^b = 0.08(test set)  
+
+H0: p = p0  
+H1: p != p0  
+  
+train set  
+Z0 = (0.1 - 0.096) / sqrt( 0.096 * (1-0.096) * (1/4000) ) = 0.8588  
+|Z0| = 0.8588 < z_0.025 = 1.96 이므로 train set에서 H0를 채택합니다. 
+  
+test set  
+Z0 = (0.08 - 0.096) / sqrt( 0.096 * (1-0.096) * (1/1000) ) = -1.7175  
+|Z0| = 1.7175 < z_0.025 = 1.96 이므로 test set에서도 H0를 채택합니다. 
+  
+따라서 유의수준 5%에서 train set과 test set의 PersonalLoan을 Accept 하는 비율은 모집단의 Accept 하는 비율과 같다고 할 수 있습니다.  
+
+
+
+<br/>
+
+### 2번  
+5-NN을 적용하고, 결과를 분석해보자.
+
+```{r 2번}
+# 5-nn 적용
+cmbnk_test_pred_knn <- knn(train = cmbnk_train, test = cmbnk_test, cl = cmbnk_train_labels, k = 5)
+
+# confusionMatrix 작성
+confusionMatrix(cmbnk_test_pred_knn, cmbnk_test_labels)
+```
+  
+Accuracy: 0.962  
+Precision: 0.9245  
+Sensitivity: 0.5904  
+Specificity: 0.9956  
+  
+Sensitivity가 0.5904로 낮은데 이는 실제로는 대출상품을 가입하지만 가입하지 않는다는 예측이 많다는 것입니다.  
+주어진 지문은 [마케팅 부서에서는 '어떤 그룹의 고객들을 타겟팅하여 집중적으로' 마케팅 예산을 투입할 지를 고민 중이다.] 인데  
+이 모델로 예측한다면 예측 결과로 얻은 특정한 고객 그룹 이외의 고객들에서도 가입 고객이 나올 것입니다.  
+이는 정해진 예산으로 홍보를 진행하느라 홍보를 받았다면 상품 가입을 했을 수도 있는 잠재적인 고객을 놓칠 가능성이 있다고 해석할 수 있습니다.  
+그러므로 예측으로 얻은 특정 그룹의 고객들을 집중 타겟팅하는 것과 동시에 또 다른 차순위 그룹들을 알아내어 홍보 그룹에 넣거나  
+나머지 고객들을 대상으로 전반적인 홍보를 진행하는 마케팅 방침을 고려해볼 필요가 있다고 생각합니다.
+
+
+
+<br/>
+
+### 3번  
+Training set 중에서 마지막 800명의 데이터를 validation set으로 사용하여, 다양한 k 값에 대해 k-NN을 적용해 보고 예측 성능을 비교해 보자.  
+k가 어떤 값을 가질때 모델의 성능이 가장 우수한가?
+
+```{r 3번}
+# train set의 마지막 800명 데이터로 validation set 생성
+cmbnk_train2 <- cmbnk_n[1:3200, ]
+cmbnk_valid <- cmbnk_n[3201:4000,]
+cmbnk_train2_labels <- cmbnk[1:3200, 1]
+cmbnk_valid_labels <- cmbnk[3201:4000,1]
+
+# k = 1 일 때 k-NN 적용 후 confusionMatrix 작성
+cmbnk_valid_pred_knn <- knn(train = cmbnk_train2, test = cmbnk_valid, cl = cmbnk_train2_labels, k = 1)
+confusionMatrix(cmbnk_valid_pred_knn, cmbnk_valid_labels)
+
+# k = 3
+cmbnk_valid_pred_knn <- knn(train = cmbnk_train2, test = cmbnk_valid, cl = cmbnk_train2_labels, k = 3)
+confusionMatrix(cmbnk_valid_pred_knn, cmbnk_valid_labels)
+
+# k = 5
+cmbnk_valid_pred_knn <- knn(train = cmbnk_train2, test = cmbnk_valid, cl = cmbnk_train2_labels, k = 5)
+confusionMatrix(cmbnk_valid_pred_knn, cmbnk_valid_labels)
+
+# k = 7
+cmbnk_valid_pred_knn <- knn(train = cmbnk_train2, test = cmbnk_valid, cl = cmbnk_train2_labels, k = 7)
+confusionMatrix(cmbnk_valid_pred_knn, cmbnk_valid_labels)
+
+# k = 9
+cmbnk_valid_pred_knn <- knn(train = cmbnk_train2, test = cmbnk_valid, cl = cmbnk_train2_labels, k = 9)
+confusionMatrix(cmbnk_valid_pred_knn, cmbnk_valid_labels)
+
+# k = 11
+cmbnk_valid_pred_knn <- knn(train = cmbnk_train2, test = cmbnk_valid, cl = cmbnk_train2_labels, k = 11)
+confusionMatrix(cmbnk_valid_pred_knn, cmbnk_valid_labels)
+```
+  
+정리하면  
+k = 1  Accuracy: 0.9575, Precision: 0.8519, Sensitivity: 0.6389, Specificity: 0.9890  
+k = 3  Accuracy: 0.9475, Precision: 0.9167, Sensitivity: 0.4583, Specificity: 0.9959  
+k = 5  Accuracy: 0.9525, Precision: 0.9474, Sensitivity: 0.5000, Specificity: 0.9973  
+k = 7  Accuracy: 0.9438, Precision: 0.9091, Sensitivity: 0.4167, Specificity: 0.9959  
+k = 9  Accuracy: 0.9462, Precision: 0.9143, Sensitivity: 0.4444, Specificity: 0.9959   
+k = 11 Accuracy: 0.9388, Precision: 0.8710, Sensitivity: 0.3750, Specificity: 0.9945  
+
+k = 1 일 때 Precision이 다소 낮지만 Accuracy와 Sensitivity가 모두 가장 높고  
+특히 Sensitivity는 다른 k 값일 때보다 많이 높기 때문에 k = 1 일 때 성능이 가장 우수합니다.
+
+
+<br/>
+
+### 4번  
+Training set에 대해 5-fold cross validation을 5회 반복하여 best k 값을 찾아보자.  
+Best k 값으로 만들어지는 최종 model에 test set을 적용하여 model의 성능을 report하자.
+
+```{r 4번}
+# z-score normalization 하기 전의 cmbnk로 train, test set 새로 생성
+cmbnk_train3 <- cmbnk[1:4000, ]
+cmbnk_test3 <- cmbnk[4001:5000, ]
+
+# z-score normalization
+z_normalized <- c("center", "scale")
+
+# 5-fold cross validation 5회 반복
+cv <- trainControl(method="repeatedcv", number = 5, repeats = 5)
+
+# k값 parameter tuning
+tune_grid <- expand.grid(k = seq(1, 99, 2))
+
+# Cross Validation으로 parameter tuning 실행
+knn_fit <- train(data=cmbnk_train3, PersonalLoan~., method="knn", 
+                 trControl = cv, preProcess = z_normalized, tuneGrid = tune_grid)
+knn_fit
+
+# k값에 따른 Accuracy 그래프 작성
+ggplot(knn_fit) + labs(title = "k값에 따른 Accuracy")
+
+# 최종 model로 test set을 예측
+cmbnk_test_pred_cv <- predict(knn_fit, cmbnk_test3)
+
+# confusionMatrix 작성
+confusionMatrix(cmbnk_test_pred_cv, cmbnk_test_labels)
+```
+  
+5-fold cross validation 5회 반복을 통해서 k = 3일 때 가장 성능이 좋으므로 3-NN이 최종 model로 선택되었습니다.  
+  
+최종 model을 test set에 적용한 결과  
+Accuracy: 0.967, Precision: 0.9310, Sensitivity: 0.6506, Specificity: 0.9956  
+  
+2번에서 train set, test set 분할 후 5-nn을 적용한 결과와  
+3번에서 train set에서 validation set으로 k-NN을 적용한 결과보다  
+Accuracy, Precision, Sensitivity, Specificity 4가지 모두가 더 높게 나왔으므로  
+5-fold cross validation 5회 반복으로 얻은 4번의 model이 더 좋은 성능을 가진 model이라 할 수 있습니다.  
+하지만 여전히 Sensitivity가 유난히 낮으므로 예산 투입을 model 예측으로 얻은 특정 그룹의 고객들에 집중시키면  
+잠재적인 고객들을 놓칠 수도 있다고 생각합니다.
+
+
+<br/>
+
+### 5번  
+3번과 4번에서 활용한 training 방식의 장단점을 비교해보자.
+  
+3번의 방식은 validation set을 한번만 뽑아 간단하고 단순합니다.  
+하지만 데이터를 어떻게 나누느냐에 따라 성능 추정에 영향을 크게 미칩니다. 만약 데이터 전체의 개수가 적다면 더 크게 영향을 받을 것입니다.  
+  
+4번의 방식은 trains set과 validation set이 서로 다른 k번의 조합이 이루어지고 k개의 평균을 하기 때문에 3번의 방식보다 변동성이 줄어듭니다.  
+하지만 반복 횟수가 많기 때문에 그만큼 계산량도 많아져 model 훈련과 평가에 시간이 걸린다는 단점이 있습니다.  
+  
+이번 과제의 경우 3번에서는 k = 1 일 때 가장 성능이 좋았지만 4번에서는 k = 1 일 때가 아닌 k = 3 일 때 가장 성능이 좋았습니다.  
+이 두 개의 결과가 3번의 방식은 변동성이 있어 가장 좋은 k 값을 틀리게 알아낼 수도 있지만  
+4번의 Cross Validation은 변동성이 줄어들어 3번의 방식보다 k 값을 잘 알아낼 수 있는 걸 보여주고 있습니다.
+  
+  
