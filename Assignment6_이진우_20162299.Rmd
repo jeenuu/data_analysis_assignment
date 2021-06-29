@@ -1,0 +1,458 @@
+---
+title: "Assignment 6  이진우  20162299"
+subtitle: "Data Analysis with Applications"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document: 
+    highlight: pygments
+  pdf_document: default
+---
+
+<br/>
+
+## Sentiment Analysis on Twitter Dataset
+“Tweets.csv” 파일은 트위터에서 미국의 6개 항공사(American, Delta, SouthWest, United, US Airways, Virgin America)를 언급하는 tweet 14,640개에 대한 정보를 수집한 데이터셋으로, 본 과제에서는 다음 두 변수를 활용한다.
+
+- airline_sentiment: “positive”, “negative”, “neutral”
+- text: tweet 텍스트
+
+변수 airline_sentiment는 각 tweet 텍스트가 항공사에 대한 긍정적인 내용인지, 부정적인 내용인지, 중립적인 내용인지에 따라 positive, negative, neutral로 분류한 결과를 나타낸다. 본 과제에서는 tweet 텍스트로부터 positive/negative/neutral 여부를 판별하기 위한 모델을 만들어본다.
+
+<br/>
+
+```{r message=FALSE}
+# 사용할 패키지 추가
+library(ggplot2)
+library(patchwork)
+library(wordcloud)
+library(tm)
+library(SnowballC)
+library(rsample)
+library(dplyr)
+library(caret)
+library(randomForest)
+library(e1071)
+library(glmnet)
+```
+
+### **1번**
+모델을 수립하기 전에 데이터의 특성을 분석한다. 시각화 도구를 적절히 활용하자.
+```{r 1a, warning = FALSE}
+# 데이터 불러오기
+tweet_raw <- read.csv("Tweets_win.csv", stringsAsFactors = FALSE)
+tweet_raw$airline_sentiment <- factor(tweet_raw$airline_sentiment)
+
+str(tweet_raw)
+
+# negative, neutral, positve tweet 분리
+negative <- subset(tweet_raw, airline_sentiment == "negative")
+neutral <- subset(tweet_raw, airline_sentiment == "neutral")
+positive <- subset(tweet_raw, airline_sentiment == "positive")
+
+# negative tweet wordcloud
+wordcloud(negative$text, max.words = 50, colors = brewer.pal(8,"Dark2"))
+
+# positive tweet wordcloud
+wordcloud(positive$text, max.words = 50, colors = brewer.pal(8,"Dark2"))
+
+# neutral tweet wordcloud
+wordcloud(neutral$text, max.words = 50, colors = brewer.pal(8,"Dark2"))
+```
+
+트윗이 '@항공사명' 으로 시작하는 텍스트가 아주 많아서 항공사가 모든 wordclound에서 크게 보입니다.  
+항공사명을 제외하고는 negative에서 cancelled, never, delay, waiting, service 등 부정적 단어가 눈에 띄고 positive 에서는 thank, great, best 등 긍정적 단어가 눈에 띕니다. neutral에서는 cancelled과 thanks가 같이 있고 부정, 긍정을 구분하는 단어가 별로 보이지 않습니다.
+
+<br/>
+
+```{r 1b}
+# target인 airline_sentiment의 분포 확인
+#ggplot(tweet, aes(x=airline_sentiment)) +
+#  geom_bar()
+table(tweet_raw$airline_sentiment)
+
+# 각 항공사별 tweet의 수와 그 항공사에서의 airline_sentiment 비율 시각화
+ggplot(tweet_raw, aes(x=airline, fill=airline_sentiment)) +
+  geom_bar(position = "stack") +
+  theme(axis.text.x=element_text(angle=30, hjust=1))
+
+# negative reason 분포 시각화
+ggplot(subset(tweet_raw, negativereason != ""), aes(x=negativereason)) +
+  geom_bar() +
+  theme(axis.text.x=element_text(angle=30, hjust=1))
+
+# airline_sentiment의 신뢰도 평균
+mean(tweet_raw$airline_sentiment_confidence)
+
+# negative reason의 신뢰도 평균
+mean(subset(tweet_raw, negativereason_confidence != 0)$negativereason_confidence)
+
+# airline_sentiment의 신뢰도 시각화
+p1 <- ggplot(tweet_raw, aes(x = airline_sentiment_confidence)) +
+  geom_histogram(bins = 50)
+
+# negative reason의 신뢰도 시각화
+p2 <- ggplot(subset(tweet_raw, negativereason_confidence != 0), aes(x=negativereason_confidence)) +
+  geom_histogram(bins = 50)
+p1 + p2
+```
+
+- 부정적인 트윗이 긍정적이거나 중립적인 트윗보다 훨씬 많습니다.
+- Virgin America 항공사의 트윗의 수가 가장 적으며 negative 트윗의 비율도 가장 적습니다. 잘 보면 항공사의 전체 트윗의 수가 많을 수록 negative 트윗의 비율이 높은 경향이 있을 수도 있다고 보입니다.   
+- negative reason을 보면 Customer Serive Issue가 매우 많습니다. 앞의 negative wordcloud에서 service도 보였는데 확실히 서비스에 만족을 못하는 고객이 많은 것을 알 수 있습니다.
+- 데이터셋의 confidence를 어떻게 구한건지 알 수는 없는데 1과 가까울 수록 보통 신뢰도가 높으므로 각 airline_sentiment와 negative reason의 신뢰도의 평균을 구해보고 히스토그램으로 시각화해봤습니다. airline_sentiment의 평균 신뢰도는 **0.9001689**로 1과 꽤 가까워서 부정, 긍정, 중립의 구분을 어느정도 신뢰도 있게 했다고 할 수 있습니다. negative reason의 평균 신뢰도는 **0.7317688**로 어떤 이유로 부정적인지 구분을 잘 했다고 하기에는 조금 부족한 것 같습니다.
+
+
+***
+
+
+### **2번**
+텍스트 데이터에 bag-of-words 기법을 적용하기 위해 적절한 preprocessing을 수행하고, 그 결과를 분석해보자.
+```{r 2a}
+# corpus 생성
+tweet_corpus <- VCorpus(VectorSource(tweet_raw$text))
+tweet_corpus
+
+tweet_corpus[[100]]$content
+
+
+# 항공사명 제거
+tweet_corpus_clean <- tm_map(tweet_corpus, removeWords, c("VirginAmerica", "united", "SouthwestAir", "@JetBlue", "USAirways", "AmericanAir"))
+tweet_corpus_clean[[100]]$content
+
+#대문자를 소문자로 변환
+tweet_corpus_clean <- tm_map(tweet_corpus_clean, content_transformer(tolower))
+tweet_corpus_clean[[100]]$content
+
+# 숫자 제거
+tweet_corpus_clean <- tm_map(tweet_corpus_clean, removeNumbers)
+
+# stopwise 제거
+tweet_corpus_clean <- tm_map(tweet_corpus_clean, removeWords, stopwords())
+tweet_corpus_clean[[100]]$content
+
+# 문장 부호 제거
+tweet_corpus_clean <- tm_map(tweet_corpus_clean, removePunctuation)
+tweet_corpus_clean[[100]]$content
+
+# stemming
+tweet_corpus_clean <- tm_map(tweet_corpus_clean, stemDocument)
+tweet_corpus_clean[[100]]$content
+
+# DTM 생성
+tweet_dtm <- DocumentTermMatrix(tweet_corpus_clean)
+tweet_dtm
+
+# 0.5% 미만의 document에서 발생하는 단어 제외
+tweet_dtm2 <- removeSparseTerms(tweet_dtm, 0.995)
+tweet_dtm2
+
+# tf-idf 계산
+tweet_tfidf <- weightTfIdf(tweet_dtm)
+inspect(tweet_tfidf[1:5,])
+
+# 0.5% 미만의 document에서 발생하는 단어 제외
+tweet_dtm3 <- removeSparseTerms(tweet_tfidf, 0.995)
+tweet_dtm3
+``` 
+
+모든 텍스트 앞에 붙는 '@항공사명'은 제거하는 것이 좋다고 판단했습니다.  
+"@VirginAmerica is anyone doing anything there today?  Website is useless and no one is answering the phone." 에서  
+항공사명, 숫자, stopwise, 문장부호를 제거하고 stemming을 해서  
+"anyon anyth today websit useless one answer phone" 으로 변환되었습니다.  
+  
+preprocessing 된 corpus로 DTM을 만들어보니 14640개의 document에 11268개의 term으로 트윗의 수보다 단어의 수가 더 적습니다.
+
+***
+
+### **3번**
+계산시간을 줄이기 위해서 첫 5,000개의 데이터만 training set으로 사용하고, 나머지 모든 데이터를 test
+set으로 사용한다. Training set을 사용하여 predictive model을 만들어보자.
+
+A) 지금까지 학습한 모델을 최대한 활용해보고, 분석 과정과 결과를 report하자. 사용하는 모델, 모델에 포함되는 파라미터에 대한 튜닝, 모델에 포함되는 feature의 수, DTM/TF-IDF 사용 여부 등이 classification accuracy에 영향을 미칠 수 있다. [주의: 모델을 수립할 때에는 test set을 사용하여 성능을 비교할 수 없다.]
+```{r 3}
+# preprocessing한 DTM을 데이터프레임으로 변환
+tweet <- data.frame(as.matrix(tweet_dtm2))
+
+# feature 이름 적절하게 조정
+colnames(tweet) <- make.names(colnames(tweet))
+
+# target 변수 추가
+tweet$airline_sentiment <- tweet_raw$airline_sentiment
+
+# 데이터셋 분할
+tweet_train <- tweet[c(1:2000),]
+tweet_test <- tweet[c(2001:14640),]
+
+# 분한된 데이터셋의 target분포 확인
+prop.table(table(tweet_train$airline_sentiment))
+prop.table(table(tweet_test$airline_sentiment))
+```
+
+첫 5000개 데이터를 training set으로 했어도 training set과 test set의 target의 분포가 거의 같은 비율로 나눠졌습니다.
+
+***
+
+### Logistic Regression 모델
+```{r 3a}
+# feature matrix 생성
+trainX <- model.matrix(airline_sentiment~., data=tweet_train)[,-1]
+trainY <- tweet_train$airline_sentiment
+
+# lasso regression 적용 cross validation
+set.seed(100)
+lasso <- cv.glmnet(x=trainX, y=trainY, alpha=1, family="multinomial", type.measure = "class", nfolds = 5)
+
+# lambda의 변화에 따른 misclassification error의 변화 확인
+lasso$cvm
+
+plot(lasso)
+
+# lasso regression 성능 확인
+min(lasso$cvm)
+```
+
+Logistic Regression 모델의 error rate: **0.2685**
+
+***
+
+### SVM 모델
+```{r 3b, warning = FALSE}
+# svm linear kernel
+set.seed(100)
+ln_tune.out <- tune(svm, airline_sentiment~., data=tweet_train, kernel="linear",
+                 ranges=list(cost=c(0.1,1,10)))
+
+# svm linear kernel 성능 확인
+ln_tune.out
+
+# svm RBF kernel
+set.seed(100)
+rbf_tune.out <- tune(svm, airline_sentiment~., data=tweet_train, kernel="radial",
+                 ranges=list(cost=c(0.1,1,10),gamma=c(0.1,1,10)))
+
+# svm RBF kernel 성능 확인
+rbf_tune.out
+
+# svm polynomial kernel
+set.seed(100)
+pl_tune.out <- tune(svm, airline_sentiment~., data=tweet_train, kernel="polynomial",
+                 ranges=list(cost=c(0.1,1,10), degree=c(2,3)))
+
+# svm polynomial kernel 성능 확인
+pl_tune.out
+```
+
+svm linear kernel 모델의 error rate: **0.281**  
+svm RBF kernel 모델의 error rate: **0.262**  
+svm polynomial kernel 모델의 error rate: **0.371**  
+
+***
+
+### Bagging 모델
+```{r 3c}
+# bagging 모델
+set.seed(100)
+bag <- randomForest(airline_sentiment~., data = tweet_train, ntree=100, mtry = ncol(tweet_train)-1)
+
+# tree 수에 따른 OOB error
+plot(bag)
+
+# bagging 모델의 성능 확인
+bag
+```
+
+Bagging 모델의 error rate: **30.05%**
+
+***
+
+### Random Forest 모델
+```{r 3d}
+# random forest 모델
+set.seed(100)
+rf <- randomForest(airline_sentiment~., data = tweet_train, ntree=100)
+
+# tree 수에 따른 OOB error
+plot(rf)
+
+# random forest 모델의 성능 확인
+rf
+```
+
+Random Forest 모델의 error rate: **26.3%**
+
+
+
+***
+
+
+
+### TF-IDF Matrix 사용
+```{r 3-2}
+# preprocessing한 DTM을 데이터프레임으로 변환
+tweet2 <- data.frame(as.matrix(tweet_dtm3))
+
+# feature 이름 적절하게 조정
+colnames(tweet2) <- make.names(colnames(tweet2))
+
+# target 변수 추가
+tweet2$airline_sentiment <- tweet_raw$airline_sentiment
+
+# 데이터셋 분할
+tweet_train2 <- tweet2[c(1:2000),]
+tweet_test2 <- tweet2[c(2001:14640),]
+
+# 분한된 데이터셋의 target분포 확인
+prop.table(table(tweet_train2$airline_sentiment))
+prop.table(table(tweet_test2$airline_sentiment))
+```
+
+첫 5000개 데이터를 training set으로 했어도 training set과 test set의 target의 분포가 거의 같은 비율로 나눠졌습니다.
+
+***
+
+### Logistic Regression 모델 ( TF-IDF 사용 )
+```{r 3aa}
+# feature matrix 생성
+trainX2 <- model.matrix(airline_sentiment~., data=tweet_train2)[,-1]
+trainY2 <- tweet_train2$airline_sentiment
+
+# lasso regression 적용 cross validation
+set.seed(100)
+lasso2 <- cv.glmnet(x=trainX2, y=trainY2, alpha=1, family="multinomial", type.measure = "class", nfolds = 5)
+
+# lambda의 변화에 따른 misclassification error의 변화 확인
+lasso2$cvm
+
+plot(lasso2)
+
+# lasso regression 성능 확인
+min(lasso2$cvm)
+```
+
+Logistic Regression 모델의 error rate: **0.294**
+
+***
+
+### SVM 모델 ( TF-IDF 사용 )
+```{r 3bb, warning = FALSE}
+# svm linear kernel
+set.seed(100)
+ln_tune.out2 <- tune(svm, airline_sentiment~., data=tweet_train2, kernel="linear",
+                 ranges=list(cost=c(0.1,1,10)))
+
+# svm linear kernel 성능 확인
+ln_tune.out2
+
+# svm RBF kernel
+set.seed(100)
+rbf_tune.out2 <- tune(svm, airline_sentiment~., data=tweet_train2, kernel="radial",
+                 ranges=list(cost=c(0.1,1,10),gamma=c(0.1,1,10)))
+
+# svm RBF kernel 성능 확인
+rbf_tune.out2
+
+# svm polynomial kernel
+set.seed(100)
+pl_tune.out2 <- tune(svm, airline_sentiment~., data=tweet_train2, kernel="polynomial",
+                 ranges=list(cost=c(0.1,1,10), degree=c(2,3)))
+
+# svm polynomial kernel 성능 확인
+pl_tune.out2
+```
+
+svm linear kernel 모델의 error rate: **0.2955**  
+svm RBF kernel 모델의 error rate: **0.2795**  
+svm polynomial kernel 모델의 error rate: **0.371**  
+
+***
+
+### Bagging 모델 ( TF-IDF 사용 )
+```{r 3cc}
+# bagging 모델
+set.seed(100)
+bag2 <- randomForest(airline_sentiment~., data = tweet_train2, ntree=100, mtry = ncol(tweet_train2)-1)
+
+# tree 수에 따른 OOB error
+plot(bag2)
+
+# bagging 모델의 성능 확인
+bag2
+```
+
+Bagging 모델의 error rate: **29.85%**
+
+***
+
+### Random Forest 모델 ( TF-IDF 사용 )
+```{r 3dd}
+# random forest 모델
+set.seed(100)
+rf2 <- randomForest(airline_sentiment~., data = tweet_train2, ntree=100)
+
+# tree 수에 따른 OOB error
+plot(rf2)
+
+# random forest 모델의 성능 확인
+rf2
+```
+
+Random Forest 모델의 error rate: **27.35%**
+
+***
+
+정리해보면
+
+#### TF-IDF 미적용
+
+|model|error rate|
+|:-----:|:-----:|
+|Logistic Regression  |0.2685|
+|SVM linear kernel    |0.281 |
+|SVM RBF kernel       |**0.262** |
+|SVM polynomial kernel|0.371 |
+|Bagging              |0.3005|
+|Random forest        |**0.263** |
+
+<br/>
+
+#### TF-IDF matrix 사용
+
+|model|error rate|
+|:-----:|:-----:|
+|Logistic Regression  |0.294 |
+|SVM linear kernel    |0.2955|
+|SVM RBF kernel       |0.2795|
+|SVM polynomial kernel|0.371 |
+|Bagging              |0.2985|
+|Random forest        |0.2735|
+
+
+전체적으로 TF-IDF matrix 사용하지 않은 모델들의 error rate가 더 낮습니다.
+
+
+<br/>
+
+***
+
+
+B) 최종적으로 선택한 모델은 무엇이며 test set에 대한 accuracy는 얼마인가?
+```{r 3-b}
+# TF-IDF 사용하지 않은 random forest 모델로 test set에 대한 예측
+rf_pred <- predict(rf, newdata = tweet_test, type = "class")
+
+# confusion matrix 작성
+confusionMatrix(rf_pred, tweet_test$airline_sentiment)
+```
+
+성능 비교 결과 RBF Kernel을 사용한 SVM 모델(TF-IDF 미사용)이 Random Forest 모델(TF-IDF 미사용)보다 미세하게 error rate가 낮기는 하지만 큰 차이가 없고 RBF Kernel을 사용한 SVM 모델(TF-IDF 미사용)의 모델 실행 시간이 많이 오래 걸렸기 때문에 Random Forest 모델(TF-IDF 미사용)을 선택했습니다.
+  
+test set에 대한 accuracy는 **0.7236** 입니다.
+
+***
+
+C) 세 class (positive, negative, neutral) 중에서 어떤 class를 분류하기 어려운가?  
+
+
+실제로 그 class인 것을 정확히 예측한 비율인 Sensitivity가 negative는 0.8673으로 나쁘지 않습니다. 그에 비해 neutral은 0.42463, positive는 0.55833로 neutral과 positive는 그다지 정확하게 분류해내지 못하고 있습니다. 데이터셋 자체에 부정적인 트윗의 수가 많아서 negative가 학습에 유리했을 수도 있고 부정적인 말에 비해 중립, 긍정적인 말은 사람이 판단해도 주관에 따라 분류하기 애매한 말이 많아서 negative에 비해 neutral, positive는 분류하기 어렵다고 생각합니다.
+
+
