@@ -1,0 +1,392 @@
+---
+title: "Assignment 5  이진우  20162299"
+subtitle: "Data Analysis with Applications"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document: 
+    highlight: pygments
+  pdf_document: default
+---
+
+<br/>
+
+## Handwritten Digit Recognition
+MNIST 데이터셋은 image classification model의 성능을 평가하는 데 주로 활용되는 데이터셋으로, 아래 예와 같이 손으로 쓰여진 숫자들의 이미지 70,000개로 구성되어 있다. 이 중에서 60,000개는 training set으로 활용되며 10,000개는 test set으로 활용된다. 각 데이터는 28 * 28 = 784개의 픽셀의 명암을 0~255 사이의 값으로 표
+현한 784개의 feature와 0~9 사이의 숫자로 표현되는 target을 포함한다. 본 과제에서는 tree를 활용하여 숫자를 분류하기 위한 classification model을 만들어본다.
+
+<br/>
+
+### 1번
+아래의 순서에 따라 data preprocessing을 수행하자.
+
+**A)** dslabs 패키지를 설치하고, 다음 코드를 실행하면 mnist 변수에 아래 설명과 같이 데이터가 저장된다.
+
+`mnist <- dslabs::read_mnist()`
+
+- mnist\$train\$images: Training set의 feature 데이터 (행렬)
+- mnist\$train\$labels: Training set의 Target 데이터 (벡터)
+- mnist\$test\$images: Test set의 feature 데이터 (행렬)
+- mnist\$test\$labels: Test set의 Target 데이터 (벡터)
+
+```{r 1-a, warning = FALSE, message=FALSE}
+# dslabs 패키지 및 사용할 패키지 추가
+library(dslabs)
+library(ggplot2)
+library(caret)
+library(rsample)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+
+mnist <- dslabs::read_mnist()
+```
+
+***
+
+**B)** Training set의 데이터 사이즈가 매우 크기 때문에 60,000개의 데이터 중에 처음 2,000개만 사용하자. 이때 feature 데이터는 변수 train_x에 저장하고, target 데이터는 변수 train_y에 저장한다. train_y의 분포를 확인해보자.
+
+```{r 1-b}
+# 2000개의 training 데이터만 사용
+train_x <- mnist$train$images[c(1:2000),c(1:784)]
+train_y <- mnist$train$labels[c(1:2000)]
+
+# 분포 시각화를 위한 ggplot 적용을 위해 데이터프레임으로 변환
+df_train_y <- data.frame(factor(train_y))
+
+# train_y의 분포 확인
+ggplot(df_train_y, aes(x=train_y)) +
+  geom_bar() +
+  geom_text(stat="count", aes(label=..count..),vjust=-0.5) +
+  scale_x_continuous(breaks = seq(0,9))
+```
+
+0~9 모두 약 200±25 정도로 어느정도 고르게 분포하고 있습니다.
+
+
+***
+
+**C)** train_x의 column의 이름을 V1, V2, V3 … 순서대로 설정하자. colnames() 함수를 사용하여 column의 이름을 수정할 수 있다.
+
+```{r 1-c}
+# train_x의 column 이름 설정
+colnames(train_x) <- paste0("V", seq(1,784,1))
+head(colnames(train_x))
+```
+
+***
+
+**D)** 784개의 픽셀 중에서 숫자와 관련없는 가장자리 부분과 같은 경우는 많은 데이터들에 대해서 같은 색을 가진다. 이러한 픽셀은 숫자를 분류하는 데 크게 영향을 미치지 않으므로 feature에서 제외시키는 것이 합리적이다. caret 패키지의 nearZeroVar(train_x) 함수를 실행하면 train_x의 column들 중에서 variance가 0이거나 0에 가까운 것들의 index를 얻을 수 있다. 이 index에 해당하는 column을 train_x에서 제외시키자. 784개의 feature 중에서 몇개가 제외되었는가?
+
+```{r 1-d}
+# nearZeroVar 함수로 제외할 column 확인
+nearZeroVar(train_x)
+
+# train_x에서 해당 column 제외
+train_x_non0 <- train_x[,-nearZeroVar(train_x)]
+
+# row, column 수 확인
+dim(train_x_non0)
+```
+1-F에서 nearZeroVar 함수로 train_x를 써야해서 train_x_non0를 새로 만들었습니다.  
+0이거나 0에 가까운 column을 제외하니 244개의 column이 남았으므로 **540개**의 feature가 제외되었습니다.
+
+***
+
+**E)** 최종적으로 train_x와 train_y를 합쳐서 train이라는 이름의 데이터프레임을 만들자.
+
+```{r 1-e}
+# train_x와 train_y를 합쳐서 train 데이터프레임 생성
+train <- data.frame(train_x_non0, train_y)
+train$train_y <- factor(train$train_y)
+
+# row, column 수 확인
+dim(train)
+```
+target인 train_y는 factor로 변환했습니다.  
+2000개의 training data와 244개의 feature, 1개의 target를 더한 245개의 column이 있습니다.
+
+***
+
+**F)** C~E의 과정을 test set에 대해서 동일하게 수행하여 test라는 이름의 데이터프레임을 만들자. 이때 D에서 제외한 feature와 동일한 feature들을 test set에서도 제외시켜야 한다.
+
+```{r 1-f}
+# B 과정
+test_x <- mnist$test$images
+test_y <- mnist$test$labels
+
+# C 과정
+colnames(test_x) <- paste0("V", seq(1,784))
+
+# D 과정, train set과 같은 feature 를 위해 nearZeroVar에 train_x 사용
+test_x_non0 <- test_x[,-nearZeroVar(train_x)]
+
+# E 과정
+test <- data.frame(test_x_non0, test_y)
+test$test_y <- factor(test$test_y)
+
+# row, column 수 확인
+dim(test)
+```
+target인 test_y도 마찬가지로 factor로 변환했습니다.  
+test에도 train과 똑같이 245개의 column이 있습니다.
+
+
+***
+***
+
+<br/>
+
+### 2번
+아래의 코드는 test set의 첫번째 데이터를 화면에 이미지로 출력해준다. 이를 활용하여 test set의 image 행렬의 행 번호를 입력받아 숫자 이미지를 출력하는 함수 print_image()를 만들어보자. 이 함수를 활용하여 test set 중에서 이미지로부터 실제 숫자값을 유추하기 어려운 예를 몇 개 찾아보자.
+
+`image(1:28, 1:28, matrix(mnist$test$images[1,], nrow=28)[ , 28:1], col = gray(seq(0, 1, 0.05)), xlab = "", ylab="")`
+
+```{r 2}
+# 사용자 정의 함수 print_image 생성
+print_image <- function(x){
+  image(1:28, 1:28, matrix(mnist$test$images[x,], nrow=28)[ , 28:1],
+        col = gray(seq(0, 1, 0.05)), xlab = "", ylab="")
+}
+
+#
+# for (i in 1:20){
+#   print_image(i)
+# }
+#
+
+# 248번 데이터는 숫자라는 걸 모르고 보면 h처럼 보입니다.
+print_image(248)
+
+# 260번 데이터는 0인지 6인지 애매합니다.
+print_image(260)
+
+# 413번 데이터는 5인지 3인지 애매합니다.
+print_image(413)
+```
+
+주석처리한 for문을 실행하면 1~20번 이미지를 아래처럼 보여주는데 이걸 i의 범위를 바꿔가면서 실제 숫자값을 유추하기 어려운 예를 찾았습니다.
+for문을 주석으로 하지않으면 html 저장 시 반복문이 실행되며 이미지가 따로따로 모두 출력되기에 RMD에서 실행해서 이미지를 확인만한 후 주석 처리하고 html로 저장했습니다.  
+
+![](C:/Users/USER/Desktop/2.png)
+
+<br/>
+
+***
+***
+
+<br/>
+
+### 3번
+아래의 순서로 tree를 만들어보자.
+
+**A)** Cost complexity parameter $a=0$일 때, leaf node가 가지는 최소 데이터의 수가 50인 Tree를 만들고 시각화해보자. Tree는 몇 개의 leaf node를 가지는가? Tree의 depth는 얼마인가?
+```{r 3-a}
+# cp=0, 최소 데이터의 수가 50인 Tree 생성
+set.seed(100)
+ct_a <- rpart(train_y~., data=train, method="class", control=list(cp=0, minbucket=50))
+
+# tree 시각화
+rpart.plot(ct_a)
+```
+
+**21**개의 leaf node를 가지고 depth는 **6**입니다.
+
+
+***
+
+**B)** Cost complexity parameter $a=0$일 때, depth가 최대 3인 Tree를 만들고 시각화해보자. Tree는 몇개의 leaf node를 가지는가? 만들어진 tree가 실제 classification에 활용될 수 있을까?
+```{r 3-b}
+# cp=0, depth가 최대 3인 Tree 생성
+set.seed(100)
+ct_b <- rpart(train_y~., data=train, method="class", control=list(cp=0, maxdepth=3))
+
+# tree 시각화
+rpart.plot(ct_b)
+```
+
+**8**개의 leaf node를 가집니다.  
+leaf node를 보면 2 5 9로 분류된 게 없어서 실제 classification에 활용되기는 어려울 것 같습니다.
+
+
+***
+
+**C)** rpart() 함수를 사용하여 Tree를 만든 후 cross validation을 활용한 pruning 과정을 수행해보자.
+```{r 3-c}
+# cp=0, minsplit=10인 Tree 생성
+set.seed(100)
+ct_base <- rpart(train_y~., data=train, method="class", control=list(minsplit=10, cp=0))
+
+# cross validation 결과
+printcp(ct_base)
+
+# tree 시각화
+rpart.plot(ct_base)
+
+# cross validation 결과
+printcp(ct_base)
+
+# cv errorr가 가장 낮은 cp값 저장
+prun_cp_base <- ct_base$cptable[which.min(ct_base$cptable[, "xerror"]),"CP"]
+
+# 가장 낮은 cp 값으로 pruned tree 생성
+prun_ct_base <- prune(ct_base, cp=prun_cp_base)
+
+# pruning 후 cross validation 결과
+printcp(prun_ct_base)
+
+# pruned tree 시각화
+rpart.plot(prun_ct_base)
+```
+
+minsplit = 10으로 default값인 20보다 노드를 더 많이 나눌 수 있게 해서 tree를 좀 더 크게 해봤습니다.  
+pruning 수행 후 leaf node의 수가 86개에서 70개로 감소한걸 확인했습니다.
+
+***
+
+**D)** C에서 얻은 tree로 test set에 대한 예측을 수행하고, confusion matrix를 계산해보자. Test set에 대한 예측 정확도는 얼마인가?
+```{r 3-d}
+# test set에 대한 예측
+pred_a <- predict(prun_ct_base, newdata = test, type = "class")
+
+# confusion matrix 계산
+confusionMatrix(pred_a, test$test_y)
+```
+Test set에 대한 Accuracy는 **0.7153** 입니다.  
+Accuracy가 낮다고 보기는 힘들지만 분류를 잘한다고 하기에는 부족하다고 생각합니다. 
+3과 5의 Sensitivity가 다른 숫자에 비해 낮으며 confusion matrix에서 확인해보니 실제 3인데 5로 예측하는 경우(105회)와 실제 5인데 3으로 예측하는 경우(100회)가 다른 경우에 비해 다소 많은 걸 확인할 수 있습니다. 
+
+
+<br/>
+
+***
+***
+
+<br/>
+
+### 4번
+Random Forest를 만들어보자.
+
+**A)** randomForest() 함수를 사용하여 bagging model을 만들어보자. mtry를 제외한 옵션은 모두 default 값을 사용한다. plot() 함수를 사용하여 Bagging model에서 tree의 수의 증가에 따른 OOB classification error rate의 변화를 그래프로 출력해보자. 어떤 경향을 보이는가?
+
+```{r 4-a}
+# mtry=244로 설정해서 bagging 적용 모델 생성
+set.seed(100)
+bag <- randomForest(train_y~., data = train, mtry = 244)
+
+# OOB classification error rate 시각화
+plot(bag)
+```
+
+tree의 수가 50개정도까지 error rate가 크게 줄어들다가 100까지 완만하게 줄어들고 100개 이후로는 줄어드는 경향이 거의 보이지 않습니다.
+
+***
+
+**B)** Bagging model로 test set에 대한 예측을 수행하고, confusion matrix를 계산해보자. Test set에 대한 예측 정확도는 얼마인가? 3번에서 계산한 tree model에 비해서 성능이 얼마나 향상되었는가?
+
+```{r 4-b}
+# test set에 대한 예측
+set.seed(100)
+pred_bag <- predict(bag, newdata = test, type = "class")
+
+# confusion matrix 계산
+confusionMatrix(pred_bag, test$test_y)
+```
+
+|model        |Accuracy|
+|:-----------:|:------:|
+|Tree         |0.7153  |
+|Bagging model|0.8935  |
+
+Bagging model이 3번의 tree의 보다 Accuracy가 **0.1782** 높으며 이 정도면 상당히 더 좋은 성능이라고 할 수 있습니다.  
+약 90% 정도 정확도로 분류하는 것으로 이 정도면 실제 classification에 활용을 고려할만 하다고 생각합니다.
+
+***
+
+**C)** randomForest() 함수의 default 옵션을 사용하여 random forest model을 만들어보자. 그리고 Bagging과 random forest 모델의 Tree의 수의 증가에 따른 OOB classification error rate의 변화를 하나의 그래프에 그려보고 두 모델의 성능을 비교해보자.
+
+```{r 4-c-1}
+# random forest model 생성
+set.seed(100)
+rf <- randomForest(train_y~., data = train)
+
+# OOB classification error rate 시각화
+plot(bag, col="red")
+plot(rf, col="blue", add=TRUE)
+```
+
+그래프가 난잡하고 알아보기가 힘들어 OOB만 다시 시각화해봤습니다. 
+
+``` {r 4-c-2}
+# ggplot 적용을 위해 데이터프레임 생성, tree의 수 column 추가
+df_bag <- data.frame(bag$err.rate, 1:500)
+df_rf <- data.frame(rf$err.rate, 1:500)
+
+# OOB classification error rate 시각화
+ggplot(df_bag, aes(y=OOB, x=X1.500)) + geom_line(color="red") +
+ geom_line(data=df_rf, aes(y=OOB, x=X1.500),color="blue") +
+  annotate("text",x=402,y=0.33,label=" ― Bagging model", color="red") +
+  annotate("text",x=420,y=0.31,label=" ― Random forest model", color="blue") +
+  labs(title="OOB classification error rate 비교",x="Tree")
+```
+
+tree의 수가 100개까지는 두 모델이 비슷한 error rate를 보이면서 줄어들다가 100개 이후로는 Random forest model의 error rate가 항상 조금 더 낮게 나옵니다. 그러므로 Random forest model이 더 좋은 성능의 모델이라고 할 수 있습니다.
+
+
+***
+
+**D)** Random forest model로 test set에 대한 예측을 수행하고, confusion matrix를 계산해보자. Test set에 대한 예측 정확도는 얼마인가? Bagging model에 비해서 성능이 얼마나 향상되었는가?
+
+```{r 4-d}
+# test set에 대한 예측
+pred_rf <- predict(rf, newdata = test, type = "class")
+
+# confusion matrix 계산
+confusionMatrix(pred_rf, test$test_y)
+```
+
+|model              |Accuracy|
+|:-----------------:|:------:|
+|Bagging model      |0.8935  |
+|Random forest model|0.9131  |
+
+Random forest model이 Bagging model보다 Accuracy가 **0.0196** 높습니다.  
+생각보다 큰 차이는 없는 것 같은데 그 이유로는 이미 1-D에서 nearZeroVar()함수로 명암이 0이거나 0에 가까워서 target에 영향을 별로 미치지 않는 feature를 제외시켰기 때문에 남아있는 feature는 모두 target에 영향을 미치는 값이라고 할 수 있습니다.  
+그러므로 target에 random forest를 적용해도 bagging과 큰 차이가 없는 결과가 나왔다고 생각합니다.
+
+
+***
+
+**E)** D번의 confusion matrix 결과로부터, 분류가 가장 정확한 숫자는 몇인가? 가장 분류가 어려운 숫자는 몇인가?
+
+실제 숫자를 그 숫자로 예측한 비율인 Sensitivity가 1이 0.9789로 가장 높고 8이 0.8480으로 가장 낮습니다.  
+분류가 가장 정확한 숫자는 1이고 가장 분류가 어려운 숫자는 8이라고 할 수 있습니다.
+
+
+***
+
+**F)** 실제 값은 7이지만 Random forest model에 의해 1로 예측되는 test data를 찾아 이미지를 몇 개 출력해보자. 눈으로 확인했을 때 7과 1의 구별이 어려운가?
+
+```{r 4-f}
+# 실제 test data의 값은 7이고 예측 값은 1인 index 추출
+test_7 <- which(test$test_y=="7" & pred_rf =="1")
+test_7
+
+# 추출한 index로 print_image() 함수에 넣어 이미지 출력
+#
+# for (i in test_7){
+#   print_image(i)
+# }
+#
+```
+
+2번에서와 같이 html 가독성을 위해 반복문은 이미지 확인만 하고 주석 처리했습니다.
+
+![](C:/Users/USER/Desktop/4f.png)
+
+552 1261 1501 1717 2064  
+3226 3581 3809 3839 3977  
+4298 4887 4967 번째 데이터가 실제 값은 7이지만 1로 예측된 데이터입니다.  
+총 13개로 confusion matrix에서 확인할 수 있는 값과 같게 잘 추출되었습니다.  
+추출한 이미지 중 **1261번**(추출한 사진 중 두번째) 데이터는 사람 눈으로봐도 7과 1을 구별하기 어렵게 보입니다.  
+**552번**(추출한 사진 중 첫번째), **3839번**(9번째), **4967번**(13번째) 데이터는 7로 보기는 어려운데 1이라고 보기에도 어려운 데이터로 보입니다.
+
